@@ -14,13 +14,11 @@ st.set_page_config(page_title="私人資產儀表板", layout="wide")
 def check_password():
     """回傳 True 如果使用者輸入正確密碼"""
     
-    # 這裡設定你的密碼 (部署後建議改用 st.secrets 管理)
-    # 如果是在本機執行，預設密碼是 "1234"
-    # 如果是在雲端執行，我們會從 st.secrets 讀取密碼
+    # 從 secrets 讀取密碼，如果沒設定則預設為 "1234"
     if "app_password" in st.secrets:
         CORRECT_PASSWORD = st.secrets["app_password"]
     else:
-        CORRECT_PASSWORD = "1234" # 本機預設密碼
+        CORRECT_PASSWORD = "1234" 
 
     if "password_correct" not in st.session_state:
         st.session_state.password_correct = False
@@ -40,8 +38,9 @@ def check_password():
             st.error("密碼錯誤")
     return False
 
+# 如果密碼沒過，就停止執行後面程式
 if not check_password():
-    st.stop() # 如果密碼錯誤或未輸入，停止執行下面的程式
+    st.stop() 
 
 # --- 通過驗證後才會執行以下內容 ---
 st.title("☁️ 雲端版：投資績效 PK 擂台")
@@ -60,6 +59,12 @@ def get_google_sheet_client():
         try:
             # 必須將 st.secrets 轉換為標準 dict 格式
             creds_dict = dict(st.secrets["gcp_service_account"])
+            
+            # 🚨【關鍵修復】🚨
+            # 強制處理 secrets 裡的換行符號問題
+            if "private_key" in creds_dict:
+                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
             client = gspread.authorize(creds)
             return client
@@ -191,7 +196,7 @@ if df_original is not None and not df_original.empty:
                     # 下載資料
                     data = yf.download(ticker, start=fetch_start, end=end_date, progress=False)
                     
-                    # 資料清理
+                    # 資料清理 (Flatten)
                     if isinstance(data.columns, pd.MultiIndex):
                         data.columns = data.columns.get_level_values(0)
                     data.index = data.index.tz_localize(None)
@@ -203,6 +208,7 @@ if df_original is not None and not df_original.empty:
                         relevant = data[data.index <= d]
                         if not relevant.empty:
                             val = relevant.iloc[-1]['Close']
+                            # 處理 Series 格式
                             if isinstance(val, pd.Series): val = val.iloc[0]
                             prices.append(float(val))
                         else:
