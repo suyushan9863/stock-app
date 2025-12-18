@@ -85,7 +85,7 @@ def load_data():
         
         df = pd.DataFrame(data)
         
-        # 欄位防呆：如果舊資料沒有 Net_Flow，自動補上 0
+        # 欄位防呆
         if "Date" not in df.columns: 
             df = pd.DataFrame(columns=["Date", "Total_Assets", "Net_Flow", "Note"])
         if "Net_Flow" not in df.columns:
@@ -100,7 +100,6 @@ def save_data(date_input, asset_value, net_flow, note):
     df = load_data()
     if df is None: return None
     
-    # 準備新資料
     new_data = pd.DataFrame({
         "Date": [str(date_input)],
         "Total_Assets": [float(asset_value)],
@@ -108,8 +107,6 @@ def save_data(date_input, asset_value, net_flow, note):
         "Note": [str(note)]
     })
     
-    # 合併與排序
-    # 這裡稍微修改邏輯：如果該欄位缺失，concat 時會自動填 NaN，我們再補 0
     df = pd.concat([df, new_data], ignore_index=True)
     df["Date"] = pd.to_datetime(df["Date"])
     df["Net_Flow"] = df["Net_Flow"].fillna(0.0)
@@ -136,41 +133,45 @@ df_original = load_data()
 
 st.sidebar.header("📝 紀錄資產")
 input_date = st.sidebar.date_input("日期", date.today())
-input_assets = st.sidebar.number_input("總資產 (TWD)", min_value=0.0, step=10000.0, format="%.0f")
+input_assets = st.sidebar.number_input("總資產 (含今日入金)", min_value=0.0, step=10000.0, format="%.0f")
 
-# 新增：資金異動欄位
 st.sidebar.markdown("---")
 input_flow = st.sidebar.number_input(
     "💰 資金異動 (選填)", 
     value=0.0, 
     step=10000.0, 
-    help="入金請填正數 (例如存錢 +50000)，出金請填負數 (例如提款 -20000)。若無異動請填 0。"
+    help="入金請填正數，出金請填負數。注意：上方的「總資產」必須包含這筆入金金額！"
 )
 
-# 即時試算預覽：避免使用者輸入錯誤
+# --- 🚨 關鍵防呆：預判損益邏輯 ---
 if df_original is not None and not df_original.empty:
-    # 確保數值型別正確
-    if "Net_Flow" not in df_original.columns:
-        df_original["Net_Flow"] = 0.0
-    
-    # 使用 to_numeric 確保是數字
+    # 確保數值正確
+    if "Net_Flow" not in df_original.columns: df_original["Net_Flow"] = 0.0
     df_original["Total_Assets"] = pd.to_numeric(df_original["Total_Assets"], errors='coerce').fillna(0.0)
-    df_original["Net_Flow"] = pd.to_numeric(df_original["Net_Flow"], errors='coerce').fillna(0.0)
-
+    
     last_record = df_original.sort_values("Date").iloc[-1]
     last_assets = float(last_record["Total_Assets"])
     
-    # 預估報酬率試算
-    denom = last_assets + input_flow
-    if denom > 0:
-        est_return = (input_assets - input_flow - last_assets) / denom * 100
-    else:
-        est_return = 0.0
-        
-    st.sidebar.info(f"📊 試算結果：\n若今日資產為 {input_assets:,.0f} 且異動 {input_flow:+,.0f}，\n相當於單日漲跌幅約 **{est_return:+.2f}%**")
+    # 預估今日投資損益 = (今日總資產 - 資金異動 - 昨日總資產)
+    est_profit = input_assets - input_flow - last_assets
     
-    if abs(est_return) > 20:
-        st.sidebar.warning("⚠️ 漲跌幅異常巨大！請確認「總資產」是否已經包含了「入金」的金額？")
+    # 簡單分母 (避免除以0)
+    denom = last_assets + (input_flow if input_flow > 0 else 0)
+    est_roi = (est_profit / denom * 100) if denom > 0 else 0.0
+
+    st.sidebar.info(f"""
+    📊 **試算檢查：**
+    昨日資產：{last_assets:,.0f}
+    今日資產：{input_assets:,.0f} (含異動)
+    扣除異動後：{input_assets - input_flow:,.0f}
+    -----------------------
+    推算今日投資損益：**{est_profit:+,.0f}** ({est_roi:+.2f}%)
+    """)
+
+    # 如果入金後，推算出的損益是大賠，高機率是忘了把入金加到總資產
+    if input_flow > 0 and est_roi < -10:
+        st.sidebar.error("⚠️ **警告：損益異常暴跌！**\n你填寫了入金，但總資產似乎沒有增加？\n\n👉 請確認「總資產」欄位已經**加上**了這筆入金金額。")
+
 else:
     st.sidebar.caption("輸入第一筆資料後即可看到試算結果。")
 
@@ -186,31 +187,27 @@ if st.sidebar.button("💾 儲存"):
 # --- 主畫面顯示 ---
 if df_original is not None and not df_original.empty:
     df_original["Date"] = pd.to_datetime(df_original["Date"])
-    # 確保數值型別正確 (處理空字串等問題)
     df_original["Total_Assets"] = pd.to_numeric(df_original["Total_Assets"], errors='coerce').fillna(0.0)
     df_original["Net_Flow"] = pd.to_numeric(df_original["Net_Flow"], errors='coerce').fillna(0.0)
 
-    # --- 核心算法：計算時間加權報酬率 (TWR) ---
-    # 1. 計算每一天的「單日報酬率」 (Daily Return)
-    #    新公式：(End - Flow - Start) / (Start + Flow)
+    # --- 核心算法：Simple Dietz Method ---
+    # 改用 Simple Dietz (權重 0.5) 讓曲線更平滑合理
     
     df_calc = df_original.sort_values("Date").copy()
     df_calc["Prev_Assets"] = df_calc["Total_Assets"].shift(1)
     
-    # 分母 = 前日資產 + 今日淨流
-    denominator = df_calc["Prev_Assets"] + df_calc["Net_Flow"]
+    # 公式：報酬率 = (期末 - 期初 - 淨流) / (期初 + 0.5 * 淨流)
+    # 假設資金在盤中進出，權重設為 0.5 (如果分母 <= 0 則設為 0)
+    denominator = df_calc["Prev_Assets"] + (df_calc["Net_Flow"] * 0.5)
     
-    # 計算報酬率 (第一筆設為 0)
     df_calc["Daily_Return"] = np.where(
         (denominator > 0) & (df_calc["Prev_Assets"].notna()),
         (df_calc["Total_Assets"] - df_calc["Net_Flow"] - df_calc["Prev_Assets"]) / denominator,
         0.0
     )
     
-    # 2. 計算累積報酬指數 (Cumulative Index)
+    # 累積報酬指數
     df_calc["Cumulative_Index"] = (1 + df_calc["Daily_Return"]).cumprod()
-    
-    # 將計算好的指數放回主資料表以便後續篩選
     df_original["Cumulative_Index"] = df_calc["Cumulative_Index"]
 
     # --- 篩選與顯示 ---
@@ -225,8 +222,16 @@ if df_original is not None and not df_original.empty:
     elif time_range == "近 3 個月": start_cutoff = today - pd.DateOffset(months=3)
     else: start_cutoff = df_original["Date"].min()
 
-    # 根據時間篩選資料
-    df_assets = df_original[df_original["Date"] >= start_cutoff].copy()
+    # 包含「錨點」的篩選邏輯
+    df_sorted = df_original.sort_values("Date").reset_index(drop=True)
+    mask_after = df_sorted["Date"] >= start_cutoff
+    
+    if mask_after.any():
+        first_idx = mask_after.idxmax()
+        start_idx = max(0, first_idx - 1)
+        df_assets = df_sorted.iloc[start_idx:].copy()
+    else:
+        df_assets = pd.DataFrame()
 
     if not df_assets.empty:
         BENCHMARKS = {
@@ -245,43 +250,22 @@ if df_original is not None and not df_original.empty:
             default=["台灣加權指數 (^TWII)"]
         )
 
-        start_date = df_assets["Date"].min().date()
-        end_date = date.today() + timedelta(days=1)
-        fetch_start = start_date - timedelta(days=10)
+        chart_start_date = df_assets["Date"].min().date()
+        chart_end_date = date.today() + timedelta(days=1)
+        fetch_start = chart_start_date - timedelta(days=10)
 
-        # 準備繪圖用的 DataFrame
         comparison_df = df_assets.set_index("Date")[["Total_Assets"]].copy()
         
-        # --- 正規化使用者的績效 (修正版) ---
-        # 修正邏輯：基準點 (Base Index) 應該要是「區間開始前一天」的指數
-        
-        # 1. 嘗試尋找區間開始前的最後一筆紀錄
-        mask_prev = df_original["Date"] < pd.Timestamp(start_date)
-        prev_date = None
-        
-        if mask_prev.any():
-            last_rec = df_original.loc[mask_prev].iloc[-1]
-            base_index = last_rec["Cumulative_Index"]
-            prev_date = last_rec["Date"]
-        else:
-            # 如果是歷史第一筆，則用當天的指數當基準
-            base_index = df_assets["Cumulative_Index"].iloc[0]
-            prev_date = None
-
-        # 2. 計算正規化績效
+        base_index = df_assets["Cumulative_Index"].iloc[0]
         comparison_df["我的績效 (%)"] = (df_assets.set_index("Date")["Cumulative_Index"] / base_index - 1) * 100
         
         cols_to_chart = ["我的績效 (%)"]
-
-        # 為了更精準的比較，如果 user 有 prev_date，我們的大盤抓取也要包含那一天
-        if prev_date:
-            fetch_start = min(fetch_start, prev_date.date() - timedelta(days=5))
 
         if selected_benchmarks:
             for bm_name in selected_benchmarks:
                 ticker = BENCHMARKS[bm_name]
                 try:
-                    data = yf.download(ticker, start=fetch_start, end=end_date, progress=False)
+                    data = yf.download(ticker, start=fetch_start, end=chart_end_date, progress=False)
                     if isinstance(data.columns, pd.MultiIndex):
                         data.columns = data.columns.get_level_values(0)
                     data.index = data.index.tz_localize(None)
@@ -299,24 +283,10 @@ if df_original is not None and not df_original.empty:
                     col_name = f"{bm_name} (%)"
                     temp_series = pd.Series(prices, index=comparison_df.index)
                     
-                    # 修正大盤基準點：
-                    # 必須找到跟 user base_index 同一個基準日 (prev_date) 的大盤價格
-                    bm_base_price = None
-                    
-                    if prev_date:
-                        # 找 prev_date 當天或之前最接近的收盤價
-                        prior_data = data[data.index <= prev_date]
-                        if not prior_data.empty:
-                            bm_base_price = float(prior_data.iloc[-1]['Close'])
-                    
-                    # 如果找不到 prev_date 的價格 (或沒有 prev_date)，則退回使用區間第一筆
-                    if bm_base_price is None:
-                        first_valid_idx = temp_series.first_valid_index()
-                        if first_valid_idx is not None:
-                            bm_base_price = temp_series.loc[first_valid_idx]
-
-                    if bm_base_price is not None:
-                        comparison_df[col_name] = ((temp_series - bm_base_price) / bm_base_price) * 100
+                    first_valid_idx = temp_series.first_valid_index()
+                    if first_valid_idx is not None:
+                        base_price = temp_series.loc[first_valid_idx]
+                        comparison_df[col_name] = ((temp_series - base_price) / base_price) * 100
                         cols_to_chart.append(col_name)
                         
                 except Exception as e:
@@ -324,12 +294,10 @@ if df_original is not None and not df_original.empty:
 
         st.line_chart(comparison_df[cols_to_chart])
         
-        # 顯示統計摘要
         latest_return = comparison_df["我的績效 (%)"].iloc[-1]
         st.metric("區間報酬率", f"{latest_return:.2f}%")
         
         with st.expander("詳細數據 (含 Net Flow)"):
-            # 顯示原始資料，方便使用者檢查出入金紀錄
             st.dataframe(df_assets.sort_values("Date", ascending=False))
             st.caption("Net_Flow: 正數代表入金，負數代表出金")
     else:
