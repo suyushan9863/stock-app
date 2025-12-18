@@ -249,7 +249,8 @@ if df_original is not None and not df_original.empty:
         # 否則區間第一天的漲跌幅會被歸零
         
         # 1. 嘗試尋找區間開始前的最後一筆紀錄
-        mask_prev = df_original["Date"] < start_date
+        # 修正：將 start_date (date物件) 轉換為 Timestamp 進行比較
+        mask_prev = df_original["Date"] < pd.Timestamp(start_date)
         if mask_prev.any():
             base_index = df_original.loc[mask_prev, "Cumulative_Index"].iloc[-1]
         else:
