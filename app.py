@@ -146,7 +146,26 @@ input_flow = st.sidebar.number_input(
     step=10000.0, 
     help="入金請填正數 (例如存錢 +50000)，出金請填負數 (例如提款 -20000)。若無異動請填 0。"
 )
-st.sidebar.caption(f"試算：若今日{input_flow:+,.0f}，則實際市場損益為 {input_assets - input_flow:,.0f} (此數值將用於計算報酬率)")
+
+# 即時試算預覽：避免使用者輸入錯誤
+if df_original is not None and not df_original.empty:
+    last_record = df_original.sort_values("Date").iloc[-1]
+    last_assets = float(last_record["Total_Assets"])
+    
+    # 預估報酬率試算
+    # 公式：(目前資產 - 資金異動 - 前次資產) / (前次資產 + 資金異動)
+    denom = last_assets + input_flow
+    if denom > 0:
+        est_return = (input_assets - input_flow - last_assets) / denom * 100
+    else:
+        est_return = 0.0
+        
+    st.sidebar.info(f"📊 試算結果：\n若今日資產為 {input_assets:,.0f} 且異動 {input_flow:+,.0f}，\n相當於單日漲跌幅約 **{est_return:+.2f}%**")
+    
+    if abs(est_return) > 20:
+        st.sidebar.warning("⚠️ 漲跌幅異常巨大！請確認「總資產」是否已經包含了「入金」的金額？")
+else:
+    st.sidebar.caption("輸入第一筆資料後即可看到試算結果。")
 
 st.sidebar.markdown("---")
 input_note = st.sidebar.text_input("備註")
@@ -165,15 +184,23 @@ if df_original is not None and not df_original.empty:
 
     # --- 核心算法：計算時間加權報酬率 (TWR) ---
     # 1. 計算每一天的「單日報酬率」 (Daily Return)
-    #    公式：(今天總資產 - 今天入金 - 昨天總資產) / 昨天總資產
+    #    舊公式：(End - Flow - Start) / Start  -> 容易因分母小而暴跌
+    #    新公式：(End - Flow - Start) / (Start + Flow) -> 假設期初入金，分母包含新資金，穩定性高
+    
     df_calc = df_original.sort_values("Date").copy()
     df_calc["Prev_Assets"] = df_calc["Total_Assets"].shift(1)
     
-    # 第一筆資料沒有前一天，設為 NaN 後續處理
-    df_calc["Daily_Return"] = (df_calc["Total_Assets"] - df_calc["Net_Flow"] - df_calc["Prev_Assets"]) / df_calc["Prev_Assets"]
+    # 分母 = 前日資產 + 今日淨流 (若為負值或0則需小心)
+    # 這裡假設入金發生在期初(或盤中)，因此參與了當日損益計算的本金應包含這筆錢
+    denominator = df_calc["Prev_Assets"] + df_calc["Net_Flow"]
     
-    # 填補第一天的報酬率為 0 (基準點)
-    df_calc["Daily_Return"] = df_calc["Daily_Return"].fillna(0.0)
+    # 計算報酬率 (第一筆設為 0)
+    # 使用 np.where 避免除以 0 的錯誤
+    df_calc["Daily_Return"] = np.where(
+        (denominator > 0) & (df_calc["Prev_Assets"].notna()),
+        (df_calc["Total_Assets"] - df_calc["Net_Flow"] - df_calc["Prev_Assets"]) / denominator,
+        0.0
+    )
     
     # 2. 計算累積報酬指數 (Cumulative Index)
     #    從 1.0 開始，每天乘上 (1 + 當日報酬率)
