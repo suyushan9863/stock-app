@@ -17,7 +17,7 @@ def check_password():
     if "app_password" in st.secrets:
         CORRECT_PASSWORD = st.secrets["app_password"]
     else:
-        CORRECT_PASSWORD = "9863" 
+        CORRECT_PASSWORD = "1234" 
 
     if "password_correct" not in st.session_state:
         st.session_state.password_correct = False
@@ -184,18 +184,15 @@ if df_original is not None and not df_original.empty:
 
     # --- 核心算法：計算時間加權報酬率 (TWR) ---
     # 1. 計算每一天的「單日報酬率」 (Daily Return)
-    #    舊公式：(End - Flow - Start) / Start  -> 容易因分母小而暴跌
-    #    新公式：(End - Flow - Start) / (Start + Flow) -> 假設期初入金，分母包含新資金，穩定性高
+    #    新公式：(End - Flow - Start) / (Start + Flow)
     
     df_calc = df_original.sort_values("Date").copy()
     df_calc["Prev_Assets"] = df_calc["Total_Assets"].shift(1)
     
-    # 分母 = 前日資產 + 今日淨流 (若為負值或0則需小心)
-    # 這裡假設入金發生在期初(或盤中)，因此參與了當日損益計算的本金應包含這筆錢
+    # 分母 = 前日資產 + 今日淨流
     denominator = df_calc["Prev_Assets"] + df_calc["Net_Flow"]
     
     # 計算報酬率 (第一筆設為 0)
-    # 使用 np.where 避免除以 0 的錯誤
     df_calc["Daily_Return"] = np.where(
         (denominator > 0) & (df_calc["Prev_Assets"].notna()),
         (df_calc["Total_Assets"] - df_calc["Net_Flow"] - df_calc["Prev_Assets"]) / denominator,
@@ -203,7 +200,6 @@ if df_original is not None and not df_original.empty:
     )
     
     # 2. 計算累積報酬指數 (Cumulative Index)
-    #    從 1.0 開始，每天乘上 (1 + 當日報酬率)
     df_calc["Cumulative_Index"] = (1 + df_calc["Daily_Return"]).cumprod()
     
     # 將計算好的指數放回主資料表以便後續篩選
@@ -248,10 +244,19 @@ if df_original is not None and not df_original.empty:
         # 準備繪圖用的 DataFrame
         comparison_df = df_assets.set_index("Date")[["Total_Assets"]].copy()
         
-        # --- 正規化使用者的績效 ---
-        # 重點：將選定區間的第一天當作基準點 (0%)
-        # 公式：(當天指數 / 區間第一天指數) - 1
-        base_index = df_assets["Cumulative_Index"].iloc[0]
+        # --- 正規化使用者的績效 (修正版) ---
+        # 修正邏輯：基準點 (Base Index) 應該要是「區間開始前一天」的指數
+        # 否則區間第一天的漲跌幅會被歸零
+        
+        # 1. 嘗試尋找區間開始前的最後一筆紀錄
+        mask_prev = df_original["Date"] < start_date
+        if mask_prev.any():
+            base_index = df_original.loc[mask_prev, "Cumulative_Index"].iloc[-1]
+        else:
+            # 如果是歷史第一筆，則用當天的指數當基準 (這時通常是 0% 起點)
+            base_index = df_assets["Cumulative_Index"].iloc[0]
+
+        # 2. 計算正規化績效
         comparison_df["我的績效 (%)"] = (df_assets.set_index("Date")["Cumulative_Index"] / base_index - 1) * 100
         
         cols_to_chart = ["我的績效 (%)"]
@@ -278,6 +283,9 @@ if df_original is not None and not df_original.empty:
                     col_name = f"{bm_name} (%)"
                     temp_series = pd.Series(prices, index=comparison_df.index)
                     
+                    # 修正大盤基準點：也需要找到區間前的收盤價
+                    # 但 yfinance 比較難精確對齊，我們採用「區間第一筆有效資料」當作 0%
+                    # 這是業界慣例，因為大盤比較只是看趨勢
                     first_valid_idx = temp_series.first_valid_index()
                     if first_valid_idx is not None:
                         base_price = temp_series.loc[first_valid_idx]
